@@ -9,10 +9,11 @@ const crypto = require("crypto");
 const PORT = Number(process.env.PORT || 8080);
 const PRINTER_NAME = process.env.PRINTER_NAME || "";
 const DISABLE_PRINT = process.env.DISABLE_PRINT === "1";
-const ORDERS_DIR = path.join(__dirname, "orders");
-const PROJECTS_DIR = path.join(__dirname, "projects");
-const EMAILS_DIR = path.join(__dirname, "emails");
-const CUSTOMERS_FILE = path.join(__dirname, "customers.json");
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+const ORDERS_DIR = path.join(DATA_DIR, "orders");
+const PROJECTS_DIR = path.join(DATA_DIR, "projects");
+const EMAILS_DIR = path.join(DATA_DIR, "emails");
+const CUSTOMERS_FILE = path.join(DATA_DIR, "customers.json");
 const MAX_REQUEST_SIZE = 150 * 1024 * 1024;
 const EMAIL_FROM = process.env.EMAIL_FROM || "fotoprints@alveraimpresion.com";
 const EMAIL_SUBJECT = "Gracias por el Registro en LA APP, TE HAS TEGISTRADO CORRECTAMENTE";
@@ -28,6 +29,7 @@ const APP_API_TOKEN = process.env.APP_API_TOKEN || "Wkq-DmE78CP69jcznk9HQgAhaXA5
 const AGENT_API_TOKEN = process.env.AGENT_API_TOKEN || "XDTybE4fA0vyix54uE_PKTT9yBjVlhOG8B2zvxVgJpo";
 const ADMIN_SESSION_TOKEN = process.env.ADMIN_SESSION_TOKEN || crypto.randomBytes(32).toString("hex");
 
+fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(ORDERS_DIR, { recursive: true });
 fs.mkdirSync(PROJECTS_DIR, { recursive: true });
 fs.mkdirSync(EMAILS_DIR, { recursive: true });

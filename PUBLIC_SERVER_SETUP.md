@@ -43,6 +43,7 @@ Copia `.env.example` y configura estas variables en tu hosting:
 
 - `APP_API_TOKEN`: debe coincidir con el token compilado en la app.
 - `AGENT_API_TOKEN`: debe coincidir con el token configurado en el agente de tienda.
+- `DATA_DIR`: carpeta persistente donde se guardan clientes, pedidos, proyectos y emails pendientes.
 - `ADMIN_EMAIL`
 - `ADMIN_PASSWORD`
 - `EMAIL_FROM`
@@ -63,6 +64,26 @@ En nube, deja:
 `DISABLE_PRINT=1`
 
 porque la impresion local se hara desde el ordenador de tienda, no desde el servidor publico.
+
+## Datos persistentes en Render
+
+Render puede borrar archivos creados dentro de la carpeta normal del servicio cuando reinicia o redespliega. Para que no se pierdan clientes ni pedidos:
+
+1. En el servicio de Render, crea un **Disk**.
+2. Usa como ruta de montaje:
+
+`/var/data`
+
+3. En **Environment Variables**, configura:
+
+`DATA_DIR=/var/data`
+
+Con eso el servidor guardara:
+
+- `/var/data/customers.json`
+- `/var/data/orders/`
+- `/var/data/projects/`
+- `/var/data/emails/`
 
 ## Agente de tienda
 
