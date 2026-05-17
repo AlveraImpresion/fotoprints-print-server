@@ -4,6 +4,7 @@ const path = require("path");
 const { spawn } = require("child_process");
 const net = require("net");
 const tls = require("tls");
+const crypto = require("crypto");
 
 const PORT = Number(process.env.PORT || 8080);
 const PRINTER_NAME = process.env.PRINTER_NAME || "";
@@ -25,6 +26,7 @@ const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "javier@alveraimpresion.com";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Jav1t3k029091974//*";
 const APP_API_TOKEN = process.env.APP_API_TOKEN || "Wkq-DmE78CP69jcznk9HQgAhaXA5gnPynLGk4rNR0HA";
 const AGENT_API_TOKEN = process.env.AGENT_API_TOKEN || "XDTybE4fA0vyix54uE_PKTT9yBjVlhOG8B2zvxVgJpo";
+const ADMIN_SESSION_TOKEN = process.env.ADMIN_SESSION_TOKEN || crypto.randomBytes(32).toString("hex");
 
 fs.mkdirSync(ORDERS_DIR, { recursive: true });
 fs.mkdirSync(PROJECTS_DIR, { recursive: true });
@@ -120,6 +122,14 @@ function sendJson(response, statusCode, payload) {
   response.end(JSON.stringify(payload));
 }
 
+function sendHtml(response, statusCode, html, headers = {}) {
+  response.writeHead(statusCode, {
+    "Content-Type": "text/html; charset=utf-8",
+    ...headers
+  });
+  response.end(html);
+}
+
 function isAuthorized(request) {
   return request.headers["x-fotoprints-token"] === APP_API_TOKEN;
 }
@@ -131,6 +141,28 @@ function isAgentAuthorized(request) {
 const server = http.createServer(async (request, response) => {
   if (request.method === "GET" && request.url === "/health") {
     sendJson(response, 200, { ok: true, service: "FotoPrints print server" });
+    return;
+  }
+
+  if (request.url === "/admin" || request.url.startsWith("/admin?")) {
+    if (request.method !== "GET") {
+      sendJson(response, 405, { ok: false, error: "Metodo no permitido" });
+      return;
+    }
+    handleAdminPage(request, response);
+    return;
+  }
+
+  if (request.method === "POST" && request.url === "/admin/web-login") {
+    await handleAdminWebLogin(request, response);
+    return;
+  }
+
+  if (request.method === "GET" && request.url === "/admin/logout") {
+    sendHtml(response, 302, "", {
+      "Location": "/admin",
+      "Set-Cookie": "fotoprints_admin=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0"
+    });
     return;
   }
 
@@ -305,6 +337,261 @@ function readRegisteredCustomers() {
   } catch (error) {
     return [];
   }
+}
+
+function handleAdminPage(request, response) {
+  if (!isAdminWebAuthenticated(request)) {
+    sendHtml(response, 200, renderAdminLoginPage());
+    return;
+  }
+
+  const requestUrl = new URL(request.url, "http://localhost");
+  const section = requestUrl.searchParams.get("section") === "orders" ? "orders" : "customers";
+  sendHtml(response, 200, renderAdminDashboard(section));
+}
+
+async function handleAdminWebLogin(request, response) {
+  try {
+    const body = await readRequestBody(request);
+    const params = new URLSearchParams(body);
+    const email = String(params.get("email") || "").trim().toLowerCase();
+    const password = String(params.get("password") || "");
+
+    if (email === ADMIN_EMAIL.toLowerCase() && password === ADMIN_PASSWORD) {
+      sendHtml(response, 302, "", {
+        "Location": "/admin",
+        "Set-Cookie": `fotoprints_admin=${ADMIN_SESSION_TOKEN}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=43200`
+      });
+      return;
+    }
+
+    sendHtml(response, 401, renderAdminLoginPage("Usuario o contrasena incorrectos"));
+  } catch (error) {
+    sendHtml(response, 500, renderAdminLoginPage("No se pudo iniciar sesion"));
+  }
+}
+
+function isAdminWebAuthenticated(request) {
+  const cookieHeader = String(request.headers.cookie || "");
+  return cookieHeader.split(";")
+    .map(item => item.trim())
+    .some(item => item === `fotoprints_admin=${ADMIN_SESSION_TOKEN}`);
+}
+
+function renderAdminLoginPage(errorMessage = "") {
+  return buildAdminHtml(`
+    <main class="login">
+      <section class="panel">
+        <h1>Administracion</h1>
+        <p class="muted">Acceso privado de Alvera Impresion</p>
+        ${errorMessage ? `<div class="error">${escapeHtml(errorMessage)}</div>` : ""}
+        <form method="post" action="/admin/web-login">
+          <label>Email</label>
+          <input name="email" type="email" autocomplete="username" required>
+          <label>Contrasena</label>
+          <input name="password" type="password" autocomplete="current-password" required>
+          <button type="submit">Entrar</button>
+        </form>
+      </section>
+    </main>
+  `);
+}
+
+function renderAdminDashboard(section) {
+  const customers = readRegisteredCustomers();
+  const orders = readStoredOrders();
+  const totalRevenue = orders.reduce((sum, order) => sum + parseMoney(order.total || order.formattedTotal), 0);
+  const activeRows = section === "orders" ? renderOrdersTable(orders) : renderCustomersTable(customers);
+
+  return buildAdminHtml(`
+    <header>
+      <div>
+        <h1>Administracion</h1>
+        <p class="muted">Clientes, pedidos y facturacion</p>
+      </div>
+      <a class="logout" href="/admin/logout">Salir</a>
+    </header>
+    <section class="summary">
+      <div><span>Clientes</span><strong>${customers.length}</strong></div>
+      <div><span>Pedidos</span><strong>${orders.length}</strong></div>
+      <div><span>Facturacion</span><strong>${formatEuro(totalRevenue)}</strong></div>
+    </section>
+    <nav class="tabs">
+      <a class="${section === "customers" ? "active" : ""}" href="/admin?section=customers">Clientes</a>
+      <a class="${section === "orders" ? "active" : ""}" href="/admin?section=orders">Pedidos</a>
+    </nav>
+    <section class="table-panel">
+      ${activeRows}
+    </section>
+  `);
+}
+
+function renderCustomersTable(customers) {
+  if (!customers.length) {
+    return `<p class="empty">Todavia no hay clientes registrados.</p>`;
+  }
+  const rows = customers.map(customer => `
+    <tr>
+      <td>${escapeHtml(customer.name)}</td>
+      <td>${escapeHtml(customer.email)}</td>
+      <td>${escapeHtml(customer.phone)}</td>
+      <td>${escapeHtml(customer.address)}</td>
+      <td>${escapeHtml(customer.postalCode)}</td>
+      <td>${escapeHtml(customer.city)}</td>
+      <td>${formatDate(customer.registeredAt)}</td>
+      <td>${formatDate(customer.updatedAt)}</td>
+    </tr>
+  `).join("");
+
+  return `
+    <h2>Clientes</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Nombre</th>
+            <th>Email</th>
+            <th>Telefono</th>
+            <th>Domicilio</th>
+            <th>Codigo postal</th>
+            <th>Ciudad</th>
+            <th>Registro</th>
+            <th>Actualizado</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderOrdersTable(orders) {
+  if (!orders.length) {
+    return `<p class="empty">Todavia no hay pedidos realizados.</p>`;
+  }
+  const rows = orders.map(order => `
+    <tr>
+      <td>${escapeHtml(order.orderNumber)}</td>
+      <td>${formatDate(order.createdAt)}</td>
+      <td>${escapeHtml(order.customerName)}</td>
+      <td>${escapeHtml(order.customerEmail)}</td>
+      <td>${escapeHtml(order.customerPhone)}</td>
+      <td>${escapeHtml(order.deliveryMethod)}</td>
+      <td>${escapeHtml(order.paymentMethod)}</td>
+      <td>${escapeHtml(order.photoCount)}</td>
+      <td>${escapeHtml(order.copyCount)}</td>
+      <td>${escapeHtml(order.formattedTotal || order.total)}</td>
+      <td>${escapeHtml(order.orderNotes)}</td>
+    </tr>
+  `).join("");
+
+  return `
+    <h2>Pedidos</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Pedido</th>
+            <th>Fecha</th>
+            <th>Cliente</th>
+            <th>Email</th>
+            <th>Telefono</th>
+            <th>Entrega</th>
+            <th>Pago</th>
+            <th>Archivos</th>
+            <th>Copias</th>
+            <th>Total</th>
+            <th>Observaciones</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function buildAdminHtml(content) {
+  return `<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Administracion FotoPrints</title>
+  <style>
+    :root { color-scheme: light; --ink: #17212b; --muted: #647282; --line: #dbe3ea; --brand: #0f766e; --soft: #eef7f5; --danger: #b42318; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, sans-serif; color: var(--ink); background: #f7f9fb; }
+    header { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 24px 28px; background: #ffffff; border-bottom: 1px solid var(--line); }
+    h1, h2, p { margin: 0; }
+    h1 { font-size: 28px; }
+    h2 { font-size: 20px; margin-bottom: 16px; }
+    .muted { color: var(--muted); margin-top: 6px; }
+    .logout, .tabs a, button { border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: #ffffff; text-decoration: none; padding: 10px 14px; font-weight: 700; }
+    .summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 18px 28px 0; }
+    .summary div { background: #ffffff; border: 1px solid var(--line); border-radius: 8px; padding: 16px; }
+    .summary span { display: block; color: var(--muted); font-size: 13px; }
+    .summary strong { display: block; margin-top: 8px; font-size: 24px; }
+    .tabs { display: flex; gap: 8px; padding: 18px 28px; }
+    .tabs a.active, button { background: var(--brand); color: #ffffff; border-color: var(--brand); }
+    .table-panel { padding: 0 28px 28px; }
+    .table-wrap { overflow: auto; background: #ffffff; border: 1px solid var(--line); border-radius: 8px; }
+    table { width: 100%; border-collapse: collapse; min-width: 980px; }
+    th, td { border-bottom: 1px solid var(--line); padding: 12px; text-align: left; vertical-align: top; font-size: 14px; }
+    th { background: var(--soft); color: #25313d; position: sticky; top: 0; }
+    tr:last-child td { border-bottom: 0; }
+    .empty { background: #ffffff; border: 1px solid var(--line); border-radius: 8px; padding: 18px; color: var(--muted); }
+    .login { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+    .panel { width: min(420px, 100%); background: #ffffff; border: 1px solid var(--line); border-radius: 10px; padding: 24px; box-shadow: 0 18px 60px rgba(16, 24, 40, .08); }
+    form { display: grid; gap: 10px; margin-top: 18px; }
+    label { font-weight: 700; font-size: 14px; }
+    input { width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 12px; font-size: 16px; }
+    button { cursor: pointer; margin-top: 8px; }
+    .error { margin-top: 14px; background: #fff1f0; color: var(--danger); border: 1px solid #fecdca; border-radius: 8px; padding: 10px; }
+    @media (max-width: 720px) {
+      header { align-items: flex-start; flex-direction: column; }
+      .summary { grid-template-columns: 1fr; }
+      h1 { font-size: 24px; }
+    }
+  </style>
+</head>
+<body>${content}</body>
+</html>`;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function formatDate(value) {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return escapeHtml(value);
+  }
+  return new Intl.DateTimeFormat("es-ES", {
+    dateStyle: "short",
+    timeStyle: "short"
+  }).format(date);
+}
+
+function parseMoney(value) {
+  const normalized = String(value || "0").replace(/[^\d,.-]/g, "").replace(",", ".");
+  const number = Number(normalized);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function formatEuro(value) {
+  return new Intl.NumberFormat("es-ES", {
+    style: "currency",
+    currency: "EUR"
+  }).format(value);
 }
 
 function saveRegisteredCustomer(customer) {
