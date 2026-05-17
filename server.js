@@ -217,6 +217,11 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === "GET" && request.url === "/admin/storage") {
+    sendJson(response, 200, getStorageStatus());
+    return;
+  }
+
   if (request.method === "POST" && request.url === "/password-recovery") {
     try {
       const body = await readRequestBody(request);
@@ -642,6 +647,31 @@ function readStoredOrders() {
     })
     .filter(Boolean)
     .sort((first, second) => String(second.createdAt || "").localeCompare(String(first.createdAt || "")));
+}
+
+function getStorageStatus() {
+  const markerPath = path.join(DATA_DIR, "storage-check.txt");
+  const writtenAt = new Date().toISOString();
+  try {
+    fs.writeFileSync(markerPath, `FotoPrints storage check ${writtenAt}\n`, "utf8");
+    return {
+      ok: true,
+      dataDir: DATA_DIR,
+      customersFile: CUSTOMERS_FILE,
+      customersCount: readRegisteredCustomers().length,
+      ordersCount: readStoredOrders().length,
+      markerPath,
+      markerExists: fs.existsSync(markerPath),
+      writtenAt
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      dataDir: DATA_DIR,
+      customersFile: CUSTOMERS_FILE,
+      error: error.message
+    };
+  }
 }
 
 function saveProject(project) {
