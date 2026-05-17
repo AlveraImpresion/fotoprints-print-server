@@ -207,6 +207,18 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === "POST" && request.url === "/customer-delete") {
+    try {
+      const body = await readRequestBody(request);
+      const customer = JSON.parse(body);
+      const deleted = deleteRegisteredCustomer(customer.email);
+      sendJson(response, 200, { ok: true, deleted });
+    } catch (error) {
+      sendJson(response, 500, { ok: false, error: error.message });
+    }
+    return;
+  }
+
   if (request.method === "GET" && request.url === "/admin/customers") {
     sendJson(response, 200, { ok: true, customers: readRegisteredCustomers() });
     return;
@@ -626,6 +638,17 @@ function saveRegisteredCustomer(customer) {
     customers.push(storedCustomer);
   }
   fs.writeFileSync(CUSTOMERS_FILE, JSON.stringify(customers, null, 2), "utf8");
+}
+
+function deleteRegisteredCustomer(emailValue) {
+  const email = String(emailValue || "").trim().toLowerCase();
+  if (!email) {
+    throw new Error("Falta el email del cliente");
+  }
+  const customers = readRegisteredCustomers();
+  const remainingCustomers = customers.filter(item => String(item.email || "").toLowerCase() !== email);
+  fs.writeFileSync(CUSTOMERS_FILE, JSON.stringify(remainingCustomers, null, 2), "utf8");
+  return customers.length - remainingCustomers.length;
 }
 
 function readStoredOrders() {
