@@ -66,15 +66,34 @@ function cleanFileName(value) {
     .slice(0, 80);
 }
 
+function renderTicketLogo() {
+  return `<div class="brand">
+    <svg class="brand-mark" viewBox="0 0 120 92" aria-label="Alvera Impresion">
+      <path d="M19 75C12 49 23 22 51 12C48 41 39 61 19 75Z" fill="#90a0aa"/>
+      <path d="M55 82C45 50 52 21 71 5C87 25 84 52 55 82Z" fill="#8495a2"/>
+      <path d="M70 75C77 45 96 22 116 18C121 48 104 72 70 75Z" fill="#8fa1af"/>
+      <path d="M21 77C35 76 47 72 58 62" fill="none" stroke="#dbeadf" stroke-width="3"/>
+      <path d="M57 81C64 67 73 48 82 23" fill="none" stroke="#eadadd" stroke-width="3"/>
+    </svg>
+    <div class="brand-text">
+      <strong>ALVERA</strong>
+      <span>IMPRESION</span>
+    </div>
+  </div>`;
+}
+
 function buildTicket(order) {
   return [
-    "FOTOPRINTS",
-    "==============================",
-    `Pedido: ${order.orderNumber || ""}`,
-    `Fecha: ${order.createdAt || ""}`,
+    "==============================================",
+    "            ALVERA IMPRESION",
+    "                FOTOPRINTS",
+    "==============================================",
+    "",
+    `PEDIDO: ${order.orderNumber || ""}`,
+    `FECHA:  ${order.createdAt || ""}`,
     "",
     "DATOS DEL CLIENTE",
-    "------------------------------",
+    "----------------------------------------------",
     `Nombre: ${order.customerName || ""}`,
     `Email: ${order.customerEmail || ""}`,
     `Telefono: ${order.customerPhone || ""}`,
@@ -85,7 +104,7 @@ function buildTicket(order) {
     `Observaciones del pedido: ${order.orderNotes || ""}`,
     "",
     "DATOS DEL PEDIDO",
-    "------------------------------",
+    "----------------------------------------------",
     `Tamano: ${order.printSize || ""}`,
     `Acabado: ${order.finish || ""}`,
     `Archivos seleccionados: ${order.photoCount || 0}`,
@@ -100,11 +119,85 @@ function buildTicket(order) {
     `Instrucciones de pago: ${order.paymentInstructions || ""}`,
     `Telefono Bizum: ${order.bizumPhone || ""}`,
     `Precio por copia: ${order.unitPrice || ""}`,
-    `Total: ${order.formattedTotal || ""}`,
     "",
-    "==============================",
+    "TOTAL",
+    "----------------------------------------------",
+    `${order.formattedTotal || ""}`,
+    "",
+    "==============================================",
+    " Revisar archivos antes de producir el pedido.",
+    "==============================================",
     ""
   ].join("\r\n");
+}
+
+function buildTicketHtml(order) {
+  const rows = [
+    ["Pedido", order.orderNumber],
+    ["Fecha", order.createdAt],
+    ["Nombre", order.customerName],
+    ["Email", order.customerEmail],
+    ["Telefono", order.customerPhone],
+    ["Domicilio", order.customerAddress],
+    ["Codigo postal", order.customerPostalCode],
+    ["Ciudad", order.customerCity],
+    ["Indicaciones", order.deliveryNotes],
+    ["Observaciones", order.orderNotes],
+    ["Tamano", order.printSize],
+    ["Acabado", order.finish],
+    ["Archivos", order.photoCount],
+    ["Copias totales", order.copyCount],
+    ["Entrega", order.deliveryMethod],
+    ["Direccion recogida", order.storePickupAddress],
+    ["Gastos de envio", order.formattedShippingCost],
+    ["Subtotal", order.formattedItemsTotal],
+    ["Descuento", `${order.discountPercent || 0}% (${order.formattedDiscountAmount || ""})`],
+    ["Forma de pago", order.paymentMethod],
+    ["Estado del pago", order.paymentStatus],
+    ["Instrucciones", order.paymentInstructions],
+    ["Telefono Bizum", order.bizumPhone],
+    ["Precio por copia", order.unitPrice]
+  ].filter(row => row[1] !== undefined && row[1] !== null && String(row[1]).trim() !== "");
+
+  return `<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Hoja de pedido ${escapeHtml(order.orderNumber || "")}</title>
+  <style>
+    @page { margin: 14mm; }
+    body { font-family: Arial, sans-serif; color: #1f1f1f; margin: 0; }
+    .sheet { border: 1px solid #111; padding: 18px; }
+    header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #111; padding-bottom: 14px; margin-bottom: 16px; }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand-mark { width: 82px; height: 64px; display: block; }
+    .brand-text { line-height: 1.05; letter-spacing: .08em; }
+    .brand-text strong { display: block; font-size: 24px; }
+    .brand-text span { display: block; font-size: 13px; font-weight: 700; letter-spacing: .22em; }
+    .order { text-align: right; font-size: 14px; line-height: 1.5; }
+    h2 { font-size: 15px; margin: 16px 0 8px; padding: 7px 9px; background: #f1f1f1; border: 1px solid #ddd; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    td { padding: 7px 8px; border-bottom: 1px solid #e5e5e5; vertical-align: top; }
+    td:first-child { width: 34%; font-weight: 700; color: #333; }
+    .total { margin-top: 18px; border: 2px solid #111; padding: 14px; text-align: right; font-size: 24px; font-weight: 800; }
+    .note { margin-top: 14px; font-size: 12px; color: #555; text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="sheet">
+    <header>
+      ${renderTicketLogo()}
+      <div class="order"><strong>Hoja de pedido</strong><br>${escapeHtml(order.orderNumber || "")}<br>${escapeHtml(order.createdAt || "")}</div>
+    </header>
+    <h2>Datos del cliente y pedido</h2>
+    <table>
+      ${rows.map(([label, value]) => `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(value)}</td></tr>`).join("")}
+    </table>
+    <div class="total">Total: ${escapeHtml(order.formattedTotal || "")}</div>
+    <div class="note">Revisar archivos recibidos antes de producir el pedido.</div>
+  </div>
+</body>
+</html>`;
 }
 
 function printTicket(ticketPath) {
@@ -404,10 +497,12 @@ async function storeIncomingOrder(order) {
   const imagesDir = path.join(orderDir, "imagenes");
   const jsonPath = path.join(orderDir, "pedido.json");
   const ticketPath = path.join(orderDir, "hoja_pedido.txt");
+  const ticketHtmlPath = path.join(orderDir, "hoja_pedido.html");
 
   fs.mkdirSync(imagesDir, { recursive: true });
   fs.writeFileSync(jsonPath, JSON.stringify(buildStoredOrder(order), null, 2), "utf8");
   fs.writeFileSync(ticketPath, buildTicket(order), "utf8");
+  fs.writeFileSync(ticketHtmlPath, buildTicketHtml(order), "utf8");
   saveOrderImages(order, imagesDir);
 
   let printResult = "Pendiente de confirmacion de pago";
@@ -1329,13 +1424,18 @@ function getAgentOrderPayload(orderNumber) {
   const orderDir = path.join(ORDERS_DIR, cleanFileName(orderNumber));
   const orderPath = path.join(orderDir, "pedido.json");
   const ticketPath = path.join(orderDir, "hoja_pedido.txt");
+  const ticketHtmlPath = path.join(orderDir, "hoja_pedido.html");
   if (!fs.existsSync(orderPath) || !fs.existsSync(ticketPath)) {
     return null;
   }
 
+  const order = JSON.parse(fs.readFileSync(orderPath, "utf8"));
   return {
-    order: JSON.parse(fs.readFileSync(orderPath, "utf8")),
+    order,
     ticketText: fs.readFileSync(ticketPath, "utf8"),
+    ticketHtml: fs.existsSync(ticketHtmlPath)
+      ? fs.readFileSync(ticketHtmlPath, "utf8")
+      : buildTicketHtml(order),
     images: readAgentOrderImages(path.join(orderDir, "imagenes"))
   };
 }
