@@ -154,6 +154,16 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === "GET" && (request.url === "/iphone" || request.url === "/iphone/")) {
+    sendHtml(response, 200, renderIphoneAppPage());
+    return;
+  }
+
+  if (request.method === "POST" && request.url === "/iphone/order") {
+    await handleIphoneOrder(request, response);
+    return;
+  }
+
   if (request.method === "GET" && request.url.startsWith("/redsys/pay/")) {
     handleRedsysPayPage(request, response);
     return;
@@ -323,43 +333,12 @@ const server = http.createServer(async (request, response) => {
   try {
     const body = await readRequestBody(request);
     const order = JSON.parse(body);
-    saveRegisteredCustomer({
-      name: order.customerName,
-      email: order.customerEmail,
-      phone: order.customerPhone,
-      address: order.customerAddress,
-      postalCode: order.customerPostalCode,
-      city: order.customerCity,
-      deliveryNotes: order.deliveryNotes
-    });
-    const orderNumber = cleanFileName(order.orderNumber);
-    const orderDir = path.join(ORDERS_DIR, orderNumber);
-    const imagesDir = path.join(orderDir, "imagenes");
-    const jsonPath = path.join(orderDir, "pedido.json");
-    const ticketPath = path.join(orderDir, "hoja_pedido.txt");
-
-    fs.mkdirSync(imagesDir, { recursive: true });
-    fs.writeFileSync(jsonPath, JSON.stringify(buildStoredOrder(order), null, 2), "utf8");
-    fs.writeFileSync(ticketPath, buildTicket(order), "utf8");
-    saveOrderImages(order, imagesDir);
-    if (isCardPaymentPending(order)) {
-      fs.writeFileSync(path.join(orderDir, "payment-pending.json"), JSON.stringify({
-        orderNumber: order.orderNumber,
-        createdAt: order.createdAt,
-        receivedAt: new Date().toISOString(),
-        paymentMethod: order.paymentMethod
-      }, null, 2), "utf8");
-    } else {
-      markOrderPendingPrint(order.orderNumber, order.createdAt);
-    }
-
-    const printResult = await printTicket(ticketPath);
-    const emailResult = await sendOrderConfirmationEmail(order);
+    const result = await storeIncomingOrder(order);
     sendJson(response, 200, {
       ok: true,
-      orderNumber: order.orderNumber,
-      printResult,
-      emailResult
+      orderNumber: result.orderNumber,
+      printResult: result.printResult,
+      emailResult: result.emailResult
     });
   } catch (error) {
     sendJson(response, 500, {
@@ -380,6 +359,84 @@ function saveOrderImages(order, imagesDir) {
     const filePath = path.join(imagesDir, fileName);
     fs.writeFileSync(filePath, Buffer.from(image.data, "base64"));
   });
+}
+
+async function handleIphoneOrder(request, response) {
+  try {
+    const body = await readRequestBody(request);
+    const order = JSON.parse(body);
+    order.orderNumber = order.orderNumber || generateWebOrderNumber();
+    order.createdAt = order.createdAt || formatSpanishDateTime(new Date());
+    const result = await storeIncomingOrder(order);
+    let paymentUrl = "";
+    if (isCardPaymentPending(order)) {
+      prepareRedsysPayment({
+        orderNumber: result.orderNumber,
+        amount: order.totalAmount,
+        customerEmail: order.customerEmail,
+        description: `Pedido FotoPrints ${result.orderNumber}`
+      });
+      paymentUrl = `${PUBLIC_BASE_URL}/redsys/pay/${encodeURIComponent(result.orderNumber)}`;
+    }
+    sendJson(response, 200, {
+      ok: true,
+      orderNumber: result.orderNumber,
+      paymentUrl
+    });
+  } catch (error) {
+    sendJson(response, 500, { ok: false, error: error.message });
+  }
+}
+
+async function storeIncomingOrder(order) {
+  saveRegisteredCustomer({
+    name: order.customerName,
+    email: order.customerEmail,
+    phone: order.customerPhone,
+    address: order.customerAddress,
+    postalCode: order.customerPostalCode,
+    city: order.customerCity,
+    deliveryNotes: order.deliveryNotes
+  });
+  const orderNumber = cleanFileName(order.orderNumber || generateWebOrderNumber());
+  order.orderNumber = orderNumber;
+  const orderDir = path.join(ORDERS_DIR, orderNumber);
+  const imagesDir = path.join(orderDir, "imagenes");
+  const jsonPath = path.join(orderDir, "pedido.json");
+  const ticketPath = path.join(orderDir, "hoja_pedido.txt");
+
+  fs.mkdirSync(imagesDir, { recursive: true });
+  fs.writeFileSync(jsonPath, JSON.stringify(buildStoredOrder(order), null, 2), "utf8");
+  fs.writeFileSync(ticketPath, buildTicket(order), "utf8");
+  saveOrderImages(order, imagesDir);
+
+  let printResult = "Pendiente de confirmacion de pago";
+  if (isCardPaymentPending(order)) {
+    fs.writeFileSync(path.join(orderDir, "payment-pending.json"), JSON.stringify({
+      orderNumber,
+      createdAt: order.createdAt,
+      receivedAt: new Date().toISOString(),
+      paymentMethod: order.paymentMethod
+    }, null, 2), "utf8");
+  } else {
+    markOrderPendingPrint(orderNumber, order.createdAt);
+    printResult = await printTicket(ticketPath);
+  }
+  const emailResult = await sendOrderConfirmationEmail(order);
+  return { orderNumber, printResult, emailResult };
+}
+
+function generateWebOrderNumber() {
+  const stamp = new Date().toISOString().replace(/\D/g, "").slice(2, 14);
+  const suffix = Math.floor(Math.random() * 1000).toString().padStart(3, "0");
+  return `WEB-${stamp}-${suffix}`;
+}
+
+function formatSpanishDateTime(date) {
+  return new Intl.DateTimeFormat("es-ES", {
+    dateStyle: "short",
+    timeStyle: "short"
+  }).format(date);
 }
 
 function buildStoredOrder(order) {
@@ -421,17 +478,27 @@ function prepareRedsysPayment(payment) {
   }
   const paymentData = {
     orderNumber,
+    redsysOrder: createRedsysOrderNumber(),
     amount,
     customerEmail: String(payment.customerEmail || "").trim(),
     description: String(payment.description || `Pedido ${orderNumber}`).slice(0, 120),
     createdAt: new Date().toISOString()
   };
   fs.writeFileSync(getRedsysPaymentPath(orderNumber), JSON.stringify(paymentData, null, 2), "utf8");
+  fs.writeFileSync(getRedsysPaymentIndexPath(paymentData.redsysOrder), JSON.stringify({ orderNumber }, null, 2), "utf8");
   return orderNumber;
 }
 
 function getRedsysPaymentPath(orderNumber) {
   return path.join(REDSYS_PAYMENTS_DIR, `${cleanFileName(orderNumber)}.json`);
+}
+
+function getRedsysPaymentIndexPath(redsysOrder) {
+  return path.join(REDSYS_PAYMENTS_DIR, `${cleanFileName(redsysOrder)}.index.json`);
+}
+
+function createRedsysOrderNumber() {
+  return Date.now().toString().slice(-12);
 }
 
 function handleRedsysPayPage(request, response) {
@@ -453,7 +520,7 @@ function handleRedsysPayPage(request, response) {
 function buildRedsysForm(payment) {
   const params = {
     DS_MERCHANT_AMOUNT: String(payment.amount),
-    DS_MERCHANT_ORDER: payment.orderNumber,
+    DS_MERCHANT_ORDER: payment.redsysOrder,
     DS_MERCHANT_MERCHANTCODE: REDSYS_MERCHANT_CODE,
     DS_MERCHANT_CURRENCY: REDSYS_CURRENCY,
     DS_MERCHANT_TRANSACTIONTYPE: "0",
@@ -469,7 +536,7 @@ function buildRedsysForm(payment) {
     endpoint: REDSYS_ENDPOINT,
     signatureVersion: "HMAC_SHA256_V1",
     merchantParameters,
-    signature: createRedsysSignature(payment.orderNumber, merchantParameters)
+    signature: createRedsysSignature(payment.redsysOrder, merchantParameters)
   };
 }
 
@@ -509,19 +576,29 @@ async function handleRedsysNotify(request, response) {
     const merchantParameters = params.get("Ds_MerchantParameters") || params.get("Ds_MerchantParameters".toLowerCase()) || "";
     const signature = params.get("Ds_Signature") || params.get("Ds_Signature".toLowerCase()) || "";
     const decoded = JSON.parse(Buffer.from(merchantParameters, "base64").toString("utf8"));
-    const orderNumber = cleanFileName(decoded.Ds_Order || decoded.DS_ORDER || decoded.Ds_Merchant_Order || decoded.DS_MERCHANT_ORDER);
-    const expectedSignature = createRedsysSignature(orderNumber, merchantParameters);
+    const redsysOrder = cleanFileName(decoded.Ds_Order || decoded.DS_ORDER || decoded.Ds_Merchant_Order || decoded.DS_MERCHANT_ORDER);
+    const expectedSignature = createRedsysSignature(redsysOrder, merchantParameters);
     if (!constantTimeEqual(signature, expectedSignature)) {
       throw new Error("Firma Redsys no valida");
     }
     const responseCode = Number(decoded.Ds_Response || decoded.DS_RESPONSE || 9999);
     if (responseCode >= 0 && responseCode <= 99) {
+      const orderNumber = getOrderNumberFromRedsysOrder(redsysOrder);
       markRedsysOrderPaid(orderNumber);
     }
     sendJson(response, 200, { ok: true });
   } catch (error) {
     sendJson(response, 500, { ok: false, error: error.message });
   }
+}
+
+function getOrderNumberFromRedsysOrder(redsysOrder) {
+  const indexPath = getRedsysPaymentIndexPath(redsysOrder);
+  if (!fs.existsSync(indexPath)) {
+    return redsysOrder;
+  }
+  const index = JSON.parse(fs.readFileSync(indexPath, "utf8"));
+  return cleanFileName(index.orderNumber || redsysOrder);
 }
 
 function constantTimeEqual(first, second) {
@@ -564,6 +641,226 @@ function renderPaymentResultPage(title, message) {
   </style>
 </head>
 <body><main><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p></main></body>
+</html>`;
+}
+
+function renderIphoneAppPage() {
+  return `<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="FotoPrints">
+  <title>FotoPrints iPhone</title>
+  <style>
+    *{box-sizing:border-box}
+    body{margin:0;background:#f4f4f4;color:#202124;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    header{position:sticky;top:0;z-index:3;background:#fff;border-bottom:1px solid #e3e3e3;padding:14px 18px;text-align:center}
+    header h1{margin:0;font-size:21px}
+    main{max-width:680px;margin:0 auto;padding:16px 14px 110px}
+    section{background:#fff;border:1px solid #e1e1e1;border-radius:10px;padding:14px;margin:0 0 12px}
+    h2{font-size:17px;margin:0 0 10px}
+    label{display:block;font-weight:700;font-size:13px;margin:12px 0 6px}
+    input,select,textarea{width:100%;border:1px solid #d7d7d7;border-radius:8px;padding:12px;font-size:16px;background:#fff;color:#202124}
+    textarea{min-height:86px;resize:vertical}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .files{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}
+    .file{border:1px solid #ddd;border-radius:8px;overflow:hidden;background:#fafafa;aspect-ratio:1;display:flex;align-items:center;justify-content:center;text-align:center;font-size:12px;padding:6px}
+    .file img{width:100%;height:100%;object-fit:cover}
+    .summary{line-height:1.5;color:#5f6368;font-size:15px}
+    .total{font-size:31px;font-weight:800;text-align:center;margin:12px 0 2px}
+    .bar{position:fixed;left:0;right:0;bottom:0;background:#fff;border-top:1px solid #ddd;padding:12px 14px calc(12px + env(safe-area-inset-bottom));display:flex;gap:10px}
+    button{border:0;border-radius:8px;font-weight:800;font-size:16px;padding:14px 16px}
+    .primary{background:#111;color:#fff;flex:1}
+    .secondary{background:#fff;color:#111;border:1px solid #bbb}
+    .notice{font-size:13px;color:#5f6368;text-align:center;margin-top:8px}
+    .ok{color:#137333;font-weight:700}
+    .error{color:#b3261e;font-weight:700}
+  </style>
+</head>
+<body>
+  <header><h1>FotoPrints</h1></header>
+  <main>
+    <section>
+      <h2>Archivos</h2>
+      <input id="files" type="file" accept="image/*,application/pdf" multiple>
+      <div id="fileGrid" class="files"></div>
+    </section>
+
+    <section>
+      <h2>Cliente</h2>
+      <label>Nombre</label><input id="name" autocomplete="name">
+      <label>Email</label><input id="email" type="email" autocomplete="email">
+      <label>Telefono</label><input id="phone" type="tel" autocomplete="tel">
+      <label>Domicilio</label><input id="address" autocomplete="street-address">
+      <div class="grid">
+        <div><label>Codigo postal</label><input id="postalCode" inputmode="numeric"></div>
+        <div><label>Ciudad</label><input id="city" value="Madrid"></div>
+      </div>
+      <label>Indicaciones de entrega</label><textarea id="deliveryNotes"></textarea>
+    </section>
+
+    <section>
+      <h2>Pedido</h2>
+      <div class="grid">
+        <div>
+          <label>Tamano</label>
+          <select id="printSize"><option>10x15</option><option>15x20</option></select>
+        </div>
+        <div>
+          <label>Acabado</label>
+          <select id="finish"><option>Brillo</option><option>Lustre</option></select>
+        </div>
+      </div>
+      <label>Copias por archivo</label><input id="copies" type="number" min="1" value="1">
+      <label>Entrega</label>
+      <select id="deliveryMethod"><option>Envio a domicilio</option><option>Recogida en tienda</option></select>
+      <label>Forma de pago</label>
+      <select id="paymentMethod"><option>Bizum</option><option>Tarjeta</option><option>PayPal</option><option>Pago en tienda</option><option>Envio de prueba</option></select>
+      <label>Observaciones del pedido</label><textarea id="orderNotes"></textarea>
+    </section>
+
+    <section>
+      <h2>Resumen</h2>
+      <div id="summary" class="summary"></div>
+      <div id="total" class="total">0,00 €</div>
+      <div class="notice">IVA incluido</div>
+      <div id="status" class="notice"></div>
+    </section>
+  </main>
+  <div class="bar">
+    <button class="secondary" id="recalcButton" type="button">Actualizar</button>
+    <button class="primary" id="sendButton" type="button">Enviar pedido</button>
+  </div>
+  <script>
+    const filesInput = document.getElementById("files");
+    const fileGrid = document.getElementById("fileGrid");
+    const statusBox = document.getElementById("status");
+    const totalBox = document.getElementById("total");
+    const summaryBox = document.getElementById("summary");
+    const shippingCost = 4.5;
+    const freeShippingThreshold = 50;
+
+    function euro(value){return new Intl.NumberFormat("es-ES",{style:"currency",currency:"EUR"}).format(value)}
+    function unitPrice(size,copies){return size === "15x20" ? (copies >= 50 ? 0.48 : 0.55) : (copies >= 50 ? 0.25 : 0.32)}
+    function selectedFiles(){return Array.from(filesInput.files || [])}
+    function calculate(){
+      const count = selectedFiles().length;
+      const copiesEach = Math.max(1, Number(document.getElementById("copies").value || 1));
+      const copies = count * copiesEach;
+      const size = document.getElementById("printSize").value;
+      const payment = document.getElementById("paymentMethod").value;
+      const delivery = document.getElementById("deliveryMethod").value;
+      const items = unitPrice(size, copies) * copies;
+      const firstPromo = Math.min(copies, 20) * unitPrice(size, copies);
+      let afterPromo = Math.max(0, items - firstPromo);
+      let shipping = delivery === "Recogida en tienda" || afterPromo >= freeShippingThreshold ? 0 : shippingCost;
+      let total = afterPromo + shipping;
+      if (payment === "Envio de prueba") total = 0;
+      summaryBox.innerHTML = "Archivos: " + count + "<br>Copias: " + copies + "<br>Tamano: " + size + "<br>Entrega: " + delivery + "<br>Pago: " + payment + "<br>Descuento primeras 20 fotos: " + euro(firstPromo) + "<br>Envio: " + euro(shipping);
+      totalBox.textContent = euro(total);
+      return {count,copiesEach,copies,size,payment,delivery,items,firstPromo,shipping,total};
+    }
+    function renderFiles(){
+      fileGrid.innerHTML = "";
+      selectedFiles().forEach(file => {
+        const div = document.createElement("div");
+        div.className = "file";
+        if (file.type.startsWith("image/")) {
+          const img = document.createElement("img");
+          img.src = URL.createObjectURL(file);
+          div.appendChild(img);
+        } else {
+          div.textContent = "PDF\\n" + file.name;
+        }
+        fileGrid.appendChild(div);
+      });
+      calculate();
+    }
+    function readFileBase64(file){
+      return new Promise((resolve,reject)=>{
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+    async function buildImages(){
+      const copiesEach = Math.max(1, Number(document.getElementById("copies").value || 1));
+      const images = [];
+      for (let i=0;i<selectedFiles().length;i++){
+        const file = selectedFiles()[i];
+        const isPdf = file.type === "application/pdf";
+        images.push({
+          fileName: (isPdf ? "documento_" : "foto_") + String(i+1).padStart(3,"0") + (isPdf ? ".pdf" : ".jpg"),
+          mimeType: file.type || (isPdf ? "application/pdf" : "image/jpeg"),
+          type: isPdf ? "pdf" : "image",
+          originalName: file.name,
+          copies: copiesEach,
+          data: await readFileBase64(file)
+        });
+      }
+      return images;
+    }
+    async function sendOrder(){
+      const calc = calculate();
+      if (!calc.count){statusBox.innerHTML = "<span class='error'>Selecciona fotos o PDF.</span>";return}
+      const required = ["name","email","phone","address","postalCode","city"];
+      for (const id of required){if(!document.getElementById(id).value.trim()){statusBox.innerHTML = "<span class='error'>Completa los datos del cliente.</span>";return}}
+      statusBox.textContent = "Preparando pedido...";
+      document.getElementById("sendButton").disabled = true;
+      try{
+        const order = {
+          customerName: document.getElementById("name").value.trim(),
+          customerEmail: document.getElementById("email").value.trim(),
+          customerPhone: document.getElementById("phone").value.trim(),
+          customerAddress: document.getElementById("address").value.trim(),
+          customerPostalCode: document.getElementById("postalCode").value.trim(),
+          customerCity: document.getElementById("city").value.trim(),
+          deliveryNotes: document.getElementById("deliveryNotes").value.trim(),
+          orderNotes: document.getElementById("orderNotes").value.trim(),
+          printSize: calc.size,
+          finish: document.getElementById("finish").value,
+          photoCount: calc.count,
+          copyCount: calc.copies,
+          deliveryMethod: calc.delivery,
+          shippingCost: calc.shipping,
+          formattedShippingCost: euro(calc.shipping),
+          storePickupAddress: calc.delivery === "Recogida en tienda" ? "Alvera Impresion, Calle San German 72 Local Izq, 28020 Madrid" : "",
+          itemsTotal: calc.items,
+          formattedItemsTotal: euro(calc.items),
+          discountPercent: calc.payment === "Envio de prueba" ? 100 : 0,
+          discountAmount: calc.payment === "Envio de prueba" ? calc.items + calc.shipping : calc.firstPromo,
+          formattedDiscountAmount: euro(calc.payment === "Envio de prueba" ? calc.items + calc.shipping : calc.firstPromo),
+          firstPromoFreeCopies: calc.firstPromo > 0 ? 20 : 0,
+          firstPromoDiscount: calc.firstPromo,
+          paymentMethod: calc.payment,
+          paymentStatus: calc.payment === "Tarjeta" ? "Pendiente de pago con tarjeta" : (calc.payment === "Bizum" || calc.payment === "Pago en tienda" ? "Pendiente de confirmacion" : "Pago realizado con exito"),
+          paymentInstructions: calc.payment,
+          unitPrice: unitPrice(calc.size, calc.copies),
+          totalAmount: calc.total,
+          formattedTotal: euro(calc.total),
+          images: await buildImages()
+        };
+        const response = await fetch("/iphone/order",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(order)});
+        const payload = await response.json();
+        if(!response.ok || !payload.ok) throw new Error(payload.error || "No se pudo enviar el pedido");
+        statusBox.innerHTML = "<span class='ok'>Pedido " + payload.orderNumber + " creado correctamente.</span>";
+        if(payload.paymentUrl){window.location.href = payload.paymentUrl}
+      }catch(error){
+        statusBox.innerHTML = "<span class='error'>" + error.message + "</span>";
+      }finally{
+        document.getElementById("sendButton").disabled = false;
+      }
+    }
+    filesInput.addEventListener("change", renderFiles);
+    document.getElementById("recalcButton").addEventListener("click", calculate);
+    document.getElementById("sendButton").addEventListener("click", sendOrder);
+    document.querySelectorAll("input,select,textarea").forEach(el => el.addEventListener("change", calculate));
+    calculate();
+  </script>
+</body>
 </html>`;
 }
 
