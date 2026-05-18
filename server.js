@@ -13,6 +13,7 @@ const DATA_DIR = process.env.DATA_DIR || __dirname;
 const ORDERS_DIR = path.join(DATA_DIR, "orders");
 const PROJECTS_DIR = path.join(DATA_DIR, "projects");
 const EMAILS_DIR = path.join(DATA_DIR, "emails");
+const REDSYS_PAYMENTS_DIR = path.join(DATA_DIR, "redsys-payments");
 const CUSTOMERS_FILE = path.join(DATA_DIR, "customers.json");
 const MAX_REQUEST_SIZE = 150 * 1024 * 1024;
 const EMAIL_FROM = process.env.EMAIL_FROM || "fotoprints@alveraimpresion.com";
@@ -28,11 +29,18 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Jav1t3k029091974//*";
 const APP_API_TOKEN = process.env.APP_API_TOKEN || "Wkq-DmE78CP69jcznk9HQgAhaXA5gnPynLGk4rNR0HA";
 const AGENT_API_TOKEN = process.env.AGENT_API_TOKEN || "XDTybE4fA0vyix54uE_PKTT9yBjVlhOG8B2zvxVgJpo";
 const ADMIN_SESSION_TOKEN = process.env.ADMIN_SESSION_TOKEN || crypto.randomBytes(32).toString("hex");
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "https://api.alveraimpresion.com";
+const REDSYS_MERCHANT_CODE = process.env.REDSYS_MERCHANT_CODE || "124381955";
+const REDSYS_TERMINAL = process.env.REDSYS_TERMINAL || "001";
+const REDSYS_CURRENCY = process.env.REDSYS_CURRENCY || "978";
+const REDSYS_SECRET_KEY = process.env.REDSYS_SECRET_KEY || "";
+const REDSYS_ENDPOINT = process.env.REDSYS_ENDPOINT || "https://sis.redsys.es/sis/realizarPago";
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(ORDERS_DIR, { recursive: true });
 fs.mkdirSync(PROJECTS_DIR, { recursive: true });
 fs.mkdirSync(EMAILS_DIR, { recursive: true });
+fs.mkdirSync(REDSYS_PAYMENTS_DIR, { recursive: true });
 if (!fs.existsSync(CUSTOMERS_FILE)) {
   fs.writeFileSync(CUSTOMERS_FILE, "[]", "utf8");
 }
@@ -143,6 +151,26 @@ function isAgentAuthorized(request) {
 const server = http.createServer(async (request, response) => {
   if (request.method === "GET" && request.url === "/health") {
     sendJson(response, 200, { ok: true, service: "FotoPrints print server" });
+    return;
+  }
+
+  if (request.method === "GET" && request.url.startsWith("/redsys/pay/")) {
+    handleRedsysPayPage(request, response);
+    return;
+  }
+
+  if (request.method === "POST" && request.url === "/redsys/notify") {
+    await handleRedsysNotify(request, response);
+    return;
+  }
+
+  if (request.method === "GET" && request.url === "/redsys/ok") {
+    sendHtml(response, 200, renderPaymentResultPage("Pago realizado", "Tu pago con tarjeta se ha realizado correctamente."));
+    return;
+  }
+
+  if (request.method === "GET" && request.url === "/redsys/ko") {
+    sendHtml(response, 200, renderPaymentResultPage("Pago no completado", "El pago no se ha completado. Puedes volver a la app e intentarlo de nuevo."));
     return;
   }
 
@@ -272,6 +300,21 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === "POST" && request.url === "/redsys/create-payment") {
+    try {
+      const body = await readRequestBody(request);
+      const payment = JSON.parse(body);
+      const orderNumber = prepareRedsysPayment(payment);
+      sendJson(response, 200, {
+        ok: true,
+        paymentUrl: `${PUBLIC_BASE_URL}/redsys/pay/${encodeURIComponent(orderNumber)}`
+      });
+    } catch (error) {
+      sendJson(response, 500, { ok: false, error: error.message });
+    }
+    return;
+  }
+
   if (request.method !== "POST" || request.url !== "/print-order") {
     sendJson(response, 404, { ok: false, error: "Ruta no encontrada" });
     return;
@@ -299,11 +342,16 @@ const server = http.createServer(async (request, response) => {
     fs.writeFileSync(jsonPath, JSON.stringify(buildStoredOrder(order), null, 2), "utf8");
     fs.writeFileSync(ticketPath, buildTicket(order), "utf8");
     saveOrderImages(order, imagesDir);
-    fs.writeFileSync(path.join(orderDir, "pending-print.json"), JSON.stringify({
-      orderNumber: order.orderNumber,
-      createdAt: order.createdAt,
-      receivedAt: new Date().toISOString()
-    }, null, 2), "utf8");
+    if (isCardPaymentPending(order)) {
+      fs.writeFileSync(path.join(orderDir, "payment-pending.json"), JSON.stringify({
+        orderNumber: order.orderNumber,
+        createdAt: order.createdAt,
+        receivedAt: new Date().toISOString(),
+        paymentMethod: order.paymentMethod
+      }, null, 2), "utf8");
+    } else {
+      markOrderPendingPrint(order.orderNumber, order.createdAt);
+    }
 
     const printResult = await printTicket(ticketPath);
     const emailResult = await sendOrderConfirmationEmail(order);
@@ -346,6 +394,177 @@ function buildStoredOrder(order) {
     manuallyCropped: Boolean(image.manuallyCropped)
   }));
   return storedOrder;
+}
+
+function isCardPaymentPending(order) {
+  return String(order.paymentMethod || "").toLowerCase() === "tarjeta"
+    && String(order.paymentStatus || "").toLowerCase().includes("pendiente");
+}
+
+function markOrderPendingPrint(orderNumber, createdAt = "") {
+  const orderDir = path.join(ORDERS_DIR, cleanFileName(orderNumber));
+  fs.writeFileSync(path.join(orderDir, "pending-print.json"), JSON.stringify({
+    orderNumber,
+    createdAt,
+    receivedAt: new Date().toISOString()
+  }, null, 2), "utf8");
+}
+
+function prepareRedsysPayment(payment) {
+  if (!REDSYS_SECRET_KEY) {
+    throw new Error("Redsys no tiene configurada la clave secreta");
+  }
+  const orderNumber = cleanFileName(payment.orderNumber);
+  const amount = Math.round(Number(payment.amount || 0) * 100);
+  if (!orderNumber || amount <= 0) {
+    throw new Error("Datos de pago incompletos");
+  }
+  const paymentData = {
+    orderNumber,
+    amount,
+    customerEmail: String(payment.customerEmail || "").trim(),
+    description: String(payment.description || `Pedido ${orderNumber}`).slice(0, 120),
+    createdAt: new Date().toISOString()
+  };
+  fs.writeFileSync(getRedsysPaymentPath(orderNumber), JSON.stringify(paymentData, null, 2), "utf8");
+  return orderNumber;
+}
+
+function getRedsysPaymentPath(orderNumber) {
+  return path.join(REDSYS_PAYMENTS_DIR, `${cleanFileName(orderNumber)}.json`);
+}
+
+function handleRedsysPayPage(request, response) {
+  try {
+    const orderNumber = cleanFileName(decodeURIComponent(request.url.split("/").pop() || ""));
+    const paymentPath = getRedsysPaymentPath(orderNumber);
+    if (!fs.existsSync(paymentPath)) {
+      sendHtml(response, 404, renderPaymentResultPage("Pago no encontrado", "No encontramos este pago."));
+      return;
+    }
+    const payment = JSON.parse(fs.readFileSync(paymentPath, "utf8"));
+    const form = buildRedsysForm(payment);
+    sendHtml(response, 200, renderRedsysAutoSubmitPage(form));
+  } catch (error) {
+    sendHtml(response, 500, renderPaymentResultPage("Error de pago", error.message));
+  }
+}
+
+function buildRedsysForm(payment) {
+  const params = {
+    DS_MERCHANT_AMOUNT: String(payment.amount),
+    DS_MERCHANT_ORDER: payment.orderNumber,
+    DS_MERCHANT_MERCHANTCODE: REDSYS_MERCHANT_CODE,
+    DS_MERCHANT_CURRENCY: REDSYS_CURRENCY,
+    DS_MERCHANT_TRANSACTIONTYPE: "0",
+    DS_MERCHANT_TERMINAL: REDSYS_TERMINAL,
+    DS_MERCHANT_MERCHANTURL: `${PUBLIC_BASE_URL}/redsys/notify`,
+    DS_MERCHANT_URLOK: `${PUBLIC_BASE_URL}/redsys/ok`,
+    DS_MERCHANT_URLKO: `${PUBLIC_BASE_URL}/redsys/ko`,
+    DS_MERCHANT_PRODUCTDESCRIPTION: payment.description,
+    DS_MERCHANT_TITULAR: payment.customerEmail || "Cliente FotoPrints"
+  };
+  const merchantParameters = Buffer.from(JSON.stringify(params), "utf8").toString("base64");
+  return {
+    endpoint: REDSYS_ENDPOINT,
+    signatureVersion: "HMAC_SHA256_V1",
+    merchantParameters,
+    signature: createRedsysSignature(payment.orderNumber, merchantParameters)
+  };
+}
+
+function createRedsysSignature(orderNumber, merchantParameters) {
+  const secret = Buffer.from(REDSYS_SECRET_KEY, "base64");
+  const iv = Buffer.alloc(8, 0);
+  const cipher = crypto.createCipheriv("des-ede3-cbc", secret, iv);
+  const merchantKey = Buffer.concat([cipher.update(orderNumber, "utf8"), cipher.final()]);
+  return crypto.createHmac("sha256", merchantKey).update(merchantParameters).digest("base64");
+}
+
+function renderRedsysAutoSubmitPage(form) {
+  return `<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pago seguro</title>
+</head>
+<body>
+  <p>Abriendo pago seguro...</p>
+  <form id="redsysForm" action="${escapeHtml(form.endpoint)}" method="post">
+    <input type="hidden" name="Ds_SignatureVersion" value="${escapeHtml(form.signatureVersion)}">
+    <input type="hidden" name="Ds_MerchantParameters" value="${escapeHtml(form.merchantParameters)}">
+    <input type="hidden" name="Ds_Signature" value="${escapeHtml(form.signature)}">
+    <button type="submit">Continuar al pago</button>
+  </form>
+  <script>document.getElementById("redsysForm").submit();</script>
+</body>
+</html>`;
+}
+
+async function handleRedsysNotify(request, response) {
+  try {
+    const body = await readRequestBody(request);
+    const params = new URLSearchParams(body);
+    const merchantParameters = params.get("Ds_MerchantParameters") || params.get("Ds_MerchantParameters".toLowerCase()) || "";
+    const signature = params.get("Ds_Signature") || params.get("Ds_Signature".toLowerCase()) || "";
+    const decoded = JSON.parse(Buffer.from(merchantParameters, "base64").toString("utf8"));
+    const orderNumber = cleanFileName(decoded.Ds_Order || decoded.DS_ORDER || decoded.Ds_Merchant_Order || decoded.DS_MERCHANT_ORDER);
+    const expectedSignature = createRedsysSignature(orderNumber, merchantParameters);
+    if (!constantTimeEqual(signature, expectedSignature)) {
+      throw new Error("Firma Redsys no valida");
+    }
+    const responseCode = Number(decoded.Ds_Response || decoded.DS_RESPONSE || 9999);
+    if (responseCode >= 0 && responseCode <= 99) {
+      markRedsysOrderPaid(orderNumber);
+    }
+    sendJson(response, 200, { ok: true });
+  } catch (error) {
+    sendJson(response, 500, { ok: false, error: error.message });
+  }
+}
+
+function constantTimeEqual(first, second) {
+  const firstBuffer = Buffer.from(String(first));
+  const secondBuffer = Buffer.from(String(second));
+  return firstBuffer.length === secondBuffer.length && crypto.timingSafeEqual(firstBuffer, secondBuffer);
+}
+
+function markRedsysOrderPaid(orderNumber) {
+  const orderDir = path.join(ORDERS_DIR, cleanFileName(orderNumber));
+  const orderPath = path.join(orderDir, "pedido.json");
+  if (!fs.existsSync(orderPath)) {
+    return;
+  }
+  const order = JSON.parse(fs.readFileSync(orderPath, "utf8"));
+  order.paymentStatus = "Pago realizado con exito";
+  order.paymentInstructions = "Tarjeta - pago confirmado por Redsys";
+  fs.writeFileSync(orderPath, JSON.stringify(order, null, 2), "utf8");
+  const pendingPaymentPath = path.join(orderDir, "payment-pending.json");
+  if (fs.existsSync(pendingPaymentPath)) {
+    fs.unlinkSync(pendingPaymentPath);
+  }
+  fs.writeFileSync(path.join(orderDir, "paid-redsys.json"), JSON.stringify({
+    orderNumber,
+    paidAt: new Date().toISOString()
+  }, null, 2), "utf8");
+  markOrderPendingPrint(orderNumber, order.createdAt);
+}
+
+function renderPaymentResultPage(title, message) {
+  return `<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(title)}</title>
+  <style>
+    body{font-family:Arial,sans-serif;margin:0;padding:32px;background:#f6f6f6;color:#202124}
+    main{max-width:520px;margin:0 auto;background:white;border-radius:12px;padding:24px;text-align:center}
+  </style>
+</head>
+<body><main><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p></main></body>
+</html>`;
 }
 
 function readRegisteredCustomers() {
