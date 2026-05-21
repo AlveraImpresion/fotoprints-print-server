@@ -100,6 +100,7 @@ function buildTicket(order) {
     `Domicilio: ${order.customerAddress || ""}`,
     `Codigo postal: ${order.customerPostalCode || ""}`,
     `Ciudad: ${order.customerCity || ""}`,
+    `Provincia: ${order.customerProvince || ""}`,
     `Indicaciones: ${order.deliveryNotes || ""}`,
     `Observaciones del pedido: ${order.orderNotes || ""}`,
     "",
@@ -141,6 +142,7 @@ function buildTicketHtml(order) {
     ["Domicilio", order.customerAddress],
     ["Codigo postal", order.customerPostalCode],
     ["Ciudad", order.customerCity],
+    ["Provincia", order.customerProvince],
     ["Indicaciones", order.deliveryNotes],
     ["Observaciones", order.orderNotes],
     ["Tamano", order.printSize],
@@ -489,6 +491,7 @@ async function storeIncomingOrder(order) {
     address: order.customerAddress,
     postalCode: order.customerPostalCode,
     city: order.customerCity,
+    province: order.customerProvince,
     deliveryNotes: order.deliveryNotes
   });
   const orderNumber = cleanFileName(order.orderNumber || generateWebOrderNumber());
@@ -793,6 +796,7 @@ function renderIphoneAppPage() {
         <div><label>Codigo postal</label><input id="postalCode" inputmode="numeric"></div>
         <div><label>Ciudad</label><input id="city" value="Madrid"></div>
       </div>
+      <label>Provincia</label><input id="province" value="Madrid">
       <label>Indicaciones de entrega</label><textarea id="deliveryNotes"></textarea>
     </section>
 
@@ -901,7 +905,7 @@ function renderIphoneAppPage() {
     async function sendOrder(){
       const calc = calculate();
       if (!calc.count){statusBox.innerHTML = "<span class='error'>Selecciona fotos o PDF.</span>";return}
-      const required = ["name","email","phone","address","postalCode","city"];
+      const required = ["name","email","phone","address","postalCode","city","province"];
       for (const id of required){if(!document.getElementById(id).value.trim()){statusBox.innerHTML = "<span class='error'>Completa los datos del cliente.</span>";return}}
       statusBox.textContent = "Preparando pedido...";
       document.getElementById("sendButton").disabled = true;
@@ -913,6 +917,7 @@ function renderIphoneAppPage() {
           customerAddress: document.getElementById("address").value.trim(),
           customerPostalCode: document.getElementById("postalCode").value.trim(),
           customerCity: document.getElementById("city").value.trim(),
+          customerProvince: document.getElementById("province").value.trim(),
           deliveryNotes: document.getElementById("deliveryNotes").value.trim(),
           orderNotes: document.getElementById("orderNotes").value.trim(),
           printSize: calc.size,
@@ -1068,6 +1073,7 @@ function renderCustomersTable(customers) {
       <td>${escapeHtml(customer.address)}</td>
       <td>${escapeHtml(customer.postalCode)}</td>
       <td>${escapeHtml(customer.city)}</td>
+      <td>${escapeHtml(customer.province)}</td>
       <td>${formatDate(customer.registeredAt)}</td>
       <td>${formatDate(customer.updatedAt)}</td>
     </tr>
@@ -1085,6 +1091,7 @@ function renderCustomersTable(customers) {
             <th>Domicilio</th>
             <th>Codigo postal</th>
             <th>Ciudad</th>
+            <th>Provincia</th>
             <th>Registro</th>
             <th>Actualizado</th>
           </tr>
@@ -1106,6 +1113,7 @@ function renderOrdersTable(orders) {
       <td>${escapeHtml(order.customerName)}</td>
       <td>${escapeHtml(order.customerEmail)}</td>
       <td>${escapeHtml(order.customerPhone)}</td>
+      <td>${escapeHtml(order.customerProvince)}</td>
       <td>${escapeHtml(order.deliveryMethod)}</td>
       <td>${escapeHtml(order.paymentMethod)}</td>
       <td>${escapeHtml(order.photoCount)}</td>
@@ -1126,6 +1134,7 @@ function renderOrdersTable(orders) {
             <th>Cliente</th>
             <th>Email</th>
             <th>Telefono</th>
+            <th>Provincia</th>
             <th>Entrega</th>
             <th>Pago</th>
             <th>Archivos</th>
@@ -1239,6 +1248,7 @@ function saveRegisteredCustomer(customer) {
     address: String(customer.address || customer.customerAddress || existingCustomer.address || "").trim(),
     postalCode: String(customer.postalCode || customer.customerPostalCode || existingCustomer.postalCode || "").trim(),
     city: String(customer.city || customer.customerCity || existingCustomer.city || "").trim(),
+    province: String(customer.province || customer.customerProvince || existingCustomer.province || "").trim(),
     deliveryNotes: String(customer.deliveryNotes || existingCustomer.deliveryNotes || "").trim(),
     registeredAt: existingCustomer.registeredAt || new Date().toISOString(),
     updatedAt: new Date().toISOString()
